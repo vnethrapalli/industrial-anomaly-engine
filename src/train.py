@@ -7,9 +7,9 @@ from src.models.autoencoder import ConvAutoencoder, compute_reconstruction_loss
 
 
 def train_custom_autoencoder(
-    model: ConvAutoencoder, datamodule, epochs: int = 10, lr: float = 1e-3
+    model: ConvAutoencoder, datamodule, epochs: int = 10, lr: float = 1e-3, save_path: str = "autoencoder_weights.pth"
 ):
-    """Native PyTorch training loop for ConvAutoencoder."""
+    """Native PyTorch training loop for ConvAutoencoder using a pre-initialized datamodule."""
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model = model.to(device)
     optimizer = torch.optim.Adam(model.parameters(), lr=lr)
@@ -34,38 +34,26 @@ def train_custom_autoencoder(
         avg_loss = total_loss / len(train_loader)
         print(f"Epoch [{epoch + 1}/{epochs}] - Loss: {avg_loss:.6f}")
 
-    # Save custom PyTorch model weights
-    torch.save(model.state_dict(), "autoencoder_weights.pth")
-    print("Autoencoder weights saved to autoencoder_weights.pth")
+    torch.save(model.state_dict(), save_path)
+    print(f"Model weights saved to {save_path}")
 
 
-def run_pipeline(model_name: str = "patchcore", category: str = "bottle"):
-    # 1. Load Data
-    datamodule = get_mvtec_dataloaders(category=category, model_name=model_name)
+def run_pipeline(model_name: str = "autoencoder", category: str = "bottle", datamodule=None, epochs: int = 10, save_path: str = "autoencoder_weights.pth"):
+    """Router function that handles model selection and training without redundant dataloading."""
+    
+    # Lazy-load datamodule only if called directly as a standalone script
+    if datamodule is None:
+        from src.dataset import get_mvtec_dataloaders
+        datamodule = get_mvtec_dataloaders(category=category, model_name=model_name)
 
-    # 2. Get Model
-    model = get_model(model_name)
-
-    # 3. Route execution path
-    if isinstance(model, ConvAutoencoder):
-        train_custom_autoencoder(model, datamodule)
+    # Instantiate model based on selection (expandable for future models)
+    if model_name == "autoencoder":
+        model = ConvAutoencoder()
+        train_custom_autoencoder(model, datamodule, epochs=epochs, save_path=save_path)
+    # Future model routing example:
+    # elif model_name == "patchcore":
+    #     model = get_patchcore_model(...)
+    #     train_patchcore(model, datamodule, ...)
     else:
-        raise ValueError(
-            f"Unsupported model '{model_name}'. Expecting ConvAutoencoder"
-        )
+        raise ValueError(f"Unsupported model '{model_name}'.")
         
-
-if __name__ == "__main__":
-    parser = argparse.ArgumentParser(
-        description="Industrial Edge Vision Training Engine"
-    )
-    parser.add_argument(
-        "--model",
-        type=str,
-        default="autoencoder",
-        choices=["autoencoder"],
-    )
-    parser.add_argument("--category", type=str, default="bottle")
-    args = parser.parse_args()
-
-    run_pipeline(model_name=args.model, category=args.category)

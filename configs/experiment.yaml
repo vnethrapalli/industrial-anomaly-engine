@@ -1,0 +1,29 @@
+# configs/experiment.yaml
+experiment_name: "conv_autoencoder_mvtec"
+category: "bottle"
+seed: 42
+
+training:
+  epochs: 10
+  batch_size: 32
+  learning_rate: 0.001
+  device: "cpu"
+
+models:
+  - name: "autoencoder"
+    enabled: true
+    weights_path: "autoencoder_weights.pth"
+
+quantization_targets:
+  - format: "fp32"          # Baseline full precision ONNX
+    enabled: true
+  - format: "int8_dynamic"   # Post-training dynamic INT8 quantization via ONNX Runtime
+    enabled: true
+
+evaluation:
+  benchmark_iterations: 100
+  metrics:
+    - "latency_ms_p50"
+    - "latency_ms_p99"
+    - "model_size_mb"
+    - "reconstruction_mse"
