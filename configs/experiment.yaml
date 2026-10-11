@@ -12,6 +12,7 @@ training:
 models:
   - name: "autoencoder"
     enabled: true
+    # Saved under experiment_artifacts/{experiment_name}/
     weights_path: "autoencoder_weights.pth"
 
 quantization_targets:
@@ -19,6 +20,12 @@ quantization_targets:
     enabled: true
   - format: "int8_dynamic"   # Post-training dynamic INT8 quantization via ONNX Runtime
     enabled: true
+
+benchmarking:
+  devices:
+    - "cpu"
+    # Requires an ONNX Runtime GPU installation and a CUDA-enabled environment.
+    - "cuda"
 
 evaluation:
   benchmark_iterations: 100

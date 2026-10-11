@@ -1,25 +1,46 @@
 # src/plot_metrics.py
 import matplotlib.pyplot as plt
 
-def plot_latency_vs_size(results):
-    formats = [r["format"] for r in results]
-    latencies = [r["latency_p50"] for r in results]
-    sizes = [r["size_mb"] for r in results]
 
-    fig, ax1 = plt.subplots(figsize=(8, 5))
+def plot_latency_vs_size(results, output_path, percentile=50):
+    """Plot latency by quantization level for each execution provider."""
+    if not results:
+        return
 
-    color = 'tab:blue'
-    ax1.set_xlabel('Model Format')
-    ax1.set_ylabel('p50 Latency (ms)', color=color)
-    ax1.bar(formats, latencies, color=color, alpha=0.6, width=0.4)
-    ax1.tick_params(axis='y', labelcolor=color)
+    formats = list(dict.fromkeys(result["format"] for result in results))
+    devices = list(dict.fromkeys(result["device"] for result in results))
 
-    ax2 = ax1.twinx()  
-    color = 'tab:red'
-    ax2.set_ylabel('Model Size (MB)', color=color)
-    ax2.plot(formats, sizes, color=color, marker='o', linewidth=2, label="Size (MB)")
-    ax2.tick_params(axis='y', labelcolor=color)
+    fig, ax = plt.subplots(figsize=(8, 5))
+    x_values = range(len(formats))
+    for device in devices:
+        device_results = {
+            result["format"]: result
+            for result in results
+            if result["device"] == device
+        }
+        latencies = [
+            device_results[model_format][f"latency_p{percentile}"]
+            for model_format in formats
+            if model_format in device_results
+        ]
+        device_formats = [
+            model_format for model_format in formats if model_format in device_results
+        ]
+        ax.plot(
+            [formats.index(model_format) for model_format in device_formats],
+            latencies,
+            marker="o",
+            linewidth=2,
+            label=device.upper(),
+        )
 
-    plt.title("Performance Trade-off: FP32 vs INT8 Quantization")
-    plt.savefig("quantization_benchmark.png", dpi=300, bbox_inches='tight')
-    print("Saved benchmark plot to quantization_benchmark.png")
+    ax.set_xticks(list(x_values), formats)
+    ax.set_xlabel("Quantization Level")
+    ax.set_ylabel(f"p{percentile} Latency (ms)")
+    ax.set_title("Inference Latency by Quantization Level")
+    ax.legend(title="Execution Provider")
+    ax.grid(axis="y", alpha=0.3)
+    fig.tight_layout()
+    fig.savefig(output_path, dpi=300, bbox_inches="tight")
+    plt.close(fig)
+    print(f"Saved benchmark plot to {output_path}")
