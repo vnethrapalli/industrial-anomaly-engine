@@ -12,11 +12,15 @@ training:
 models:
   - name: "autoencoder"
     enabled: true
+    # Use "best" for the lowest validation loss, or "epoch" for the final configured epoch.
+    selection: "epoch"
     # Saved under experiment_artifacts/{experiment_name}/
     weights_path: "autoencoder_weights.pth"
 
 quantization_targets:
   - format: "fp32"          # Baseline full precision ONNX
+    enabled: true
+  - format: "fp16"          # Half precision ONNX conversion
     enabled: true
   - format: "int8_dynamic"   # Post-training dynamic INT8 quantization via ONNX Runtime
     enabled: true

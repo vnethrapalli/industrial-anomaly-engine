@@ -1,4 +1,5 @@
 import argparse
+from copy import deepcopy
 import torch
 
 from src.dataset import get_mvtec_dataloaders
@@ -13,6 +14,7 @@ def train_custom_autoencoder(
     lr: float = 1e-3,
     save_path: str = "autoencoder_weights.pth",
     device: str = "auto",
+    selection: str = "best",
 ):
     """Native PyTorch training loop for ConvAutoencoder using a pre-initialized datamodule."""
     requested_device = device.lower()
@@ -33,10 +35,23 @@ def train_custom_autoencoder(
     model = model.to(torch_device)
     optimizer = torch.optim.Adam(model.parameters(), lr=lr)
     train_loader = datamodule.train_dataloader()
+    val_loader = datamodule.val_dataloader()
+    if selection == "best":
+        selected_epoch = None
+    elif selection == "epoch":
+        selected_epoch = epochs
+    else:
+        raise ValueError("Model selection must be 'best' or 'epoch'.")
 
     print(f"Training ConvAutoencoder on device: {torch_device}")
-    model.train()
+    train_losses = []
+    validation_losses = []
+    best_validation_loss = float("inf")
+    best_state = None
+    selected_state = None
+
     for epoch in range(epochs):
+        model.train()
         total_loss = 0.0
         for batch in train_loader:
             images = batch.image if hasattr(batch, "image") else batch["image"]
@@ -51,10 +66,43 @@ def train_custom_autoencoder(
             total_loss += loss.item()
 
         avg_loss = total_loss / len(train_loader)
-        print(f"Epoch [{epoch + 1}/{epochs}] - Loss: {avg_loss:.6f}")
+        model.eval()
+        validation_total_loss = 0.0
+        with torch.no_grad():
+            for batch in val_loader:
+                images = batch.image if hasattr(batch, "image") else batch["image"]
+                images = images.to(torch_device)
+                reconstructions = model(images)
+                validation_total_loss += compute_reconstruction_loss(
+                    reconstructions, images
+                ).item()
 
+        avg_validation_loss = validation_total_loss / len(val_loader)
+        train_losses.append(avg_loss)
+        validation_losses.append(avg_validation_loss)
+        print(
+            f"Epoch [{epoch + 1}/{epochs}] - "
+            f"Train Loss: {avg_loss:.6f} - "
+            f"Validation Loss: {avg_validation_loss:.6f}"
+        )
+
+        if avg_validation_loss < best_validation_loss:
+            best_validation_loss = avg_validation_loss
+            best_state = deepcopy(model.state_dict())
+        if selected_epoch == epoch + 1:
+            selected_state = deepcopy(model.state_dict())
+
+    if best_state is None or (selected_epoch is not None and selected_state is None):
+        raise RuntimeError("Training did not produce a model checkpoint.")
+
+    model.load_state_dict(best_state if selected_epoch is None else selected_state)
     torch.save(model.state_dict(), save_path)
     print(f"Model weights saved to {save_path}")
+    return {
+        "train_losses": train_losses,
+        "validation_losses": validation_losses,
+        "best_epoch": validation_losses.index(best_validation_loss) + 1,
+    }
 
 
 def run_pipeline(
@@ -65,6 +113,7 @@ def run_pipeline(
     lr: float = 1e-3,
     save_path: str = "autoencoder_weights.pth",
     device: str = "auto",
+    selection: str = "best",
 ):
     """Router function that handles model selection and training without redundant dataloading."""
     
@@ -76,13 +125,14 @@ def run_pipeline(
     # Instantiate model based on selection (expandable for future models)
     if model_name == "autoencoder":
         model = ConvAutoencoder()
-        train_custom_autoencoder(
+        return train_custom_autoencoder(
             model,
             datamodule,
             epochs=epochs,
             lr=lr,
             save_path=save_path,
             device=device,
+            selection=selection,
         )
     # Future model routing example:
     # elif model_name == "patchcore":
