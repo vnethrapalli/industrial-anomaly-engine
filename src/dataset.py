@@ -1,9 +1,40 @@
 # src/dataset.py
+import os
+
 import albumentations as A
 from albumentations.pytorch import ToTensorV2
 from anomalib.data import MVTecAD
+from huggingface_hub import snapshot_download
 import numpy as np
 import torch
+
+DATASET_ROOT = "./datasets/MVTecAD"
+HF_DATASET_REPO = "foersben/mvtec-ad"
+
+
+def _ensure_mvtec_category(category: str) -> None:
+    """Download the requested MVTec category when it is not cached locally."""
+    category_root = f"{DATASET_ROOT}/{category}"
+    required_directories = (
+        f"{category_root}/train",
+        f"{category_root}/test",
+        f"{category_root}/ground_truth",
+    )
+    if all(os.path.isdir(path) for path in required_directories):
+        return
+
+    snapshot_download(
+        repo_id=HF_DATASET_REPO,
+        repo_type="dataset",
+        allow_patterns=[f"{category}/**"],
+        local_dir=DATASET_ROOT,
+    )
+
+    if not all(os.path.isdir(path) for path in required_directories):
+        raise RuntimeError(
+            f"Hugging Face dataset did not provide the expected files for category "
+            f"'{category}' under {DATASET_ROOT}."
+        )
 
 
 def get_mvtec_dataloaders(
@@ -46,15 +77,16 @@ def get_mvtec_dataloaders(
         augmented = pipeline(image=image)
         return augmented["image"], None
 
+    _ensure_mvtec_category(category)
+
     # 4. Instantiate DataModule
     datamodule = MVTecAD(
-        root="./datasets/MVTecAD",
+        root=DATASET_ROOT,
         category=category,
         train_batch_size=batch_size,
         eval_batch_size=batch_size,
         augmentations=transform,
     )
 
-    datamodule.prepare_data()
     datamodule.setup()
     return datamodule

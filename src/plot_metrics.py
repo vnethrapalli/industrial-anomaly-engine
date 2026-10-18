@@ -43,6 +43,10 @@ def plot_latency_vs_size(results, output_path, percentile=50):
         key=lambda model_format: format_order.get(model_format, len(format_order)),
     )
     devices = list(dict.fromkeys(result["device"] for result in results))
+    device_labels = {
+        "cpu": "CPU",
+        "cuda": "T4 GPU (CUDA)",
+    }
 
     fig, ax = plt.subplots(figsize=(8, 5))
     x_values = range(len(formats))
@@ -65,7 +69,7 @@ def plot_latency_vs_size(results, output_path, percentile=50):
             latencies,
             marker="o",
             linewidth=2,
-            label=device.upper(),
+            label=device_labels.get(device.lower(), device.upper()),
         )
 
     ax.set_xticks(list(x_values), formats)

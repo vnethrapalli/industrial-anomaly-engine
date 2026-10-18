@@ -211,6 +211,10 @@ tempCodeRunnerFile.py
 # PyPI configuration file
 .pypirc
 
+# ONNX model artifacts
+*.onnx
+*.onnx.data
+
 # Marimo
 marimo/_static/
 marimo/_lsp/
