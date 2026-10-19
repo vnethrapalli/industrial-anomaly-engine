@@ -42,6 +42,8 @@ def get_mvtec_dataloaders(
     batch_size: int = 32,
     image_size: tuple[int, int] = (224, 224),
     model_name: str = None,
+    validation_split: float = 0.2,
+    seed: int = 42,
 ):
     """Downloads category data and constructs MVTec AD DataModule with Albumentations transforms."""
     # 1. Enforce batch size constraint if EfficientAD is specified
@@ -52,6 +54,7 @@ def get_mvtec_dataloaders(
     pipeline = A.Compose(
         [
             A.Resize(height=image_size[0], width=image_size[1]),
+            A.Normalize(mean=(0.0, 0.0, 0.0), std=(1.0, 1.0, 1.0)),
             ToTensorV2(),
         ]
     )
@@ -85,6 +88,10 @@ def get_mvtec_dataloaders(
         category=category,
         train_batch_size=batch_size,
         eval_batch_size=batch_size,
+        test_split_mode="from_dir",
+        val_split_mode="from_train",
+        val_split_ratio=validation_split,
+        seed=seed,
         augmentations=transform,
     )
 

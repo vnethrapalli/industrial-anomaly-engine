@@ -4,16 +4,17 @@ category: "bottle"
 seed: 42
 
 training:
-  epochs: 10
+  epochs: 20
   batch_size: 32
   learning_rate: 0.001
-  device: "cpu"
+  device: "auto"
+  validation_split: 0.2
 
 models:
   - name: "autoencoder"
     enabled: true
-    # Use "best" for the lowest validation loss, or "epoch" for the final configured epoch.
-    selection: "epoch"
+    # Select the checkpoint with the lowest normal-validation reconstruction loss.
+    selection: "best"
     # Saved under experiment_artifacts/{experiment_name}/
     weights_path: "autoencoder_weights.pth"
 
@@ -33,8 +34,14 @@ benchmarking:
 
 evaluation:
   benchmark_iterations: 100
+  device: "auto"
+  anomaly_threshold_percentile: 95.0
   metrics:
     - "latency_ms_p50"
     - "latency_ms_p99"
     - "model_size_mb"
-    - "reconstruction_mse"
+    - "image_accuracy"
+    - "image_precision"
+    - "image_recall"
+    - "image_f1"
+    - "image_auroc"
