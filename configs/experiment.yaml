@@ -1,6 +1,12 @@
 # configs/experiment.yaml
-experiment_name: "conv_autoencoder_mvtec"
-category: "bottle"
+experiment_name: "conv_autoencoder_mvtec_multicategory"
+# Available categories: bottle, cable, capsule, carpet, grid, hazelnut,
+# leather, metal_nut, pill, screw, tile, toothbrush, transistor, wood, zipper.
+category:
+  - "bottle"
+  - "grid"
+  - "hazelnut"
+  - "cable"
 seed: 42
 
 training:

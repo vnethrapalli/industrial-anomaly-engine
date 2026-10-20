@@ -4,9 +4,11 @@ import os
 import albumentations as A
 from albumentations.pytorch import ToTensorV2
 from anomalib.data import MVTecAD
+from anomalib.data.utils import concatenate_datasets
 from huggingface_hub import snapshot_download
 import numpy as np
 import torch
+from torch.utils.data import DataLoader
 
 DATASET_ROOT = "./datasets/MVTecAD"
 HF_DATASET_REPO = "foersben/mvtec-ad"
@@ -37,8 +39,48 @@ def _ensure_mvtec_category(category: str) -> None:
         )
 
 
+class CombinedMVTecDataModule:
+    """Combine per-category MVTec splits while preserving their collate function."""
+
+    def __init__(self, datamodules, batch_size: int):
+        self.train_data = concatenate_datasets(
+            [datamodule.train_data for datamodule in datamodules]
+        )
+        self.val_data = concatenate_datasets(
+            [datamodule.val_data for datamodule in datamodules]
+        )
+        self.test_data = concatenate_datasets(
+            [datamodule.test_data for datamodule in datamodules]
+        )
+        self.batch_size = batch_size
+
+    def train_dataloader(self):
+        return DataLoader(
+            self.train_data,
+            batch_size=self.batch_size,
+            shuffle=True,
+            collate_fn=self.train_data.collate_fn,
+        )
+
+    def val_dataloader(self):
+        return DataLoader(
+            self.val_data,
+            batch_size=self.batch_size,
+            shuffle=False,
+            collate_fn=self.val_data.collate_fn,
+        )
+
+    def test_dataloader(self):
+        return DataLoader(
+            self.test_data,
+            batch_size=self.batch_size,
+            shuffle=False,
+            collate_fn=self.test_data.collate_fn,
+        )
+
+
 def get_mvtec_dataloaders(
-    category: str = "bottle",
+    category: str | list[str] = "bottle",
     batch_size: int = 32,
     image_size: tuple[int, int] = (224, 224),
     model_name: str = None,
@@ -80,20 +122,27 @@ def get_mvtec_dataloaders(
         augmented = pipeline(image=image)
         return augmented["image"], None
 
-    _ensure_mvtec_category(category)
+    categories = [category] if isinstance(category, str) else category
+    if not categories:
+        raise ValueError("At least one MVTec category is required.")
 
-    # 4. Instantiate DataModule
-    datamodule = MVTecAD(
-        root=DATASET_ROOT,
-        category=category,
-        train_batch_size=batch_size,
-        eval_batch_size=batch_size,
-        test_split_mode="from_dir",
-        val_split_mode="from_train",
-        val_split_ratio=validation_split,
-        seed=seed,
-        augmentations=transform,
-    )
+    datamodules = []
+    for category_name in categories:
+        _ensure_mvtec_category(category_name)
+        datamodule = MVTecAD(
+            root=DATASET_ROOT,
+            category=category_name,
+            train_batch_size=batch_size,
+            eval_batch_size=batch_size,
+            test_split_mode="from_dir",
+            val_split_mode="from_train",
+            val_split_ratio=validation_split,
+            seed=seed,
+            augmentations=transform,
+        )
+        datamodule.setup()
+        datamodules.append(datamodule)
 
-    datamodule.setup()
-    return datamodule
+    if len(datamodules) == 1:
+        return datamodules[0]
+    return CombinedMVTecDataModule(datamodules, batch_size=batch_size)
