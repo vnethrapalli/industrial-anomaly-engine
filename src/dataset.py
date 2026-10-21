@@ -96,7 +96,6 @@ def get_mvtec_dataloaders(
     pipeline = A.Compose(
         [
             A.Resize(height=image_size[0], width=image_size[1]),
-            A.Normalize(mean=(0.0, 0.0, 0.0), std=(1.0, 1.0, 1.0)),
             ToTensorV2(),
         ]
     )

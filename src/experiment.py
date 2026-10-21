@@ -376,6 +376,7 @@ def run_experiment(config_path: str):
                 device=training_config.get("device", "auto"),
                 save_path=str(pending_path),
                 selection=selection,
+                loss_alpha=float(training_config.get("loss_alpha", 0.85)),
             )
             if selection == "best":
                 best_epoch = history["best_epoch"]

@@ -87,3 +87,8 @@ docker build -f app/Dockerfile -t industrial-anomaly-api .
   overhead offsets the cheaper INT8 arithmetic for this small model.
 - These findings are model- and provider-dependent; larger models or different
   hardware may show clearer FP16/INT8 size and latency benefits.
+- The autoencoder uses a hybrid reconstruction loss weighted 85% toward MSE and
+  15% toward SSIM; although this improves structural sharpness, global
+  autoencoders can dilute the pixel-level error from small localized defects,
+  motivating feature-bank memory architectures such as PatchCore.
+- The reported image-level AUROC for the autoencoder was 0.64145.

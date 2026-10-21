@@ -15,6 +15,7 @@ def train_custom_autoencoder(
     save_path: str = "autoencoder_weights.pth",
     device: str = "auto",
     selection: str = "best",
+    loss_alpha: float = 0.85,
 ):
     """Native PyTorch training loop for ConvAutoencoder using a pre-initialized datamodule."""
     requested_device = device.lower()
@@ -59,7 +60,9 @@ def train_custom_autoencoder(
 
             optimizer.zero_grad()
             reconstructions = model(images)
-            loss = compute_reconstruction_loss(reconstructions, images)
+            loss = compute_reconstruction_loss(
+                reconstructions, images, alpha=loss_alpha
+            )
             loss.backward()
             optimizer.step()
 
@@ -74,7 +77,7 @@ def train_custom_autoencoder(
                 images = images.to(torch_device)
                 reconstructions = model(images)
                 validation_total_loss += compute_reconstruction_loss(
-                    reconstructions, images
+                    reconstructions, images, alpha=loss_alpha
                 ).item()
 
         avg_validation_loss = validation_total_loss / len(val_loader)
@@ -114,6 +117,7 @@ def run_pipeline(
     save_path: str = "autoencoder_weights.pth",
     device: str = "auto",
     selection: str = "best",
+    loss_alpha: float = 0.85,
 ):
     """Router function that handles model selection and training without redundant dataloading."""
     
@@ -133,6 +137,7 @@ def run_pipeline(
             save_path=save_path,
             device=device,
             selection=selection,
+            loss_alpha=loss_alpha,
         )
     # Future model routing example:
     # elif model_name == "patchcore":

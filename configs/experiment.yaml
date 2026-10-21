@@ -6,13 +6,15 @@ category:
   - "bottle"
   - "grid"
   - "hazelnut"
-  - "cable"
 seed: 42
 
 training:
   epochs: 20
   batch_size: 32
   learning_rate: 0.001
+  # Weight for MSE in the combined MSE + SSIM reconstruction loss.
+  # The remaining weight (1 - loss_alpha) is applied to SSIM loss.
+  loss_alpha: 0.85
   device: "auto"
   validation_split: 0.2
 
