@@ -1,7 +1,8 @@
 # industrial-anomaly-engine
 
-An experiment pipeline for training a convolutional autoencoder on an MVTec category,
-exporting it to ONNX, and comparing FP32, FP16, and dynamic INT8 inference.
+An experiment pipeline for evaluating a convolutional autoencoder and PatchCore on
+MVTec categories, exporting model artifacts, and comparing FP32, FP16, and dynamic
+INT8 inference.
 
 The detector uses an unsupervised reconstruction approach: it learns normal
 examples from defect-free training images and flags large reconstruction errors
@@ -10,11 +11,26 @@ at inference time.
 ## Project flow
 
 1. `src/experiment.py` loads `configs/experiment.yaml` and the MVTec dataloaders.
-2. The configured model is trained, or existing selected weights are reused.
-3. The weights are exported to a baseline FP32 ONNX model.
-4. FP16 conversion and dynamic INT8 quantization create additional ONNX artifacts.
-5. Each enabled format is benchmarked on the configured CPU and CUDA providers.
-6. Model size and latency metrics are printed and saved with the benchmark plot.
+2. Autoencoder weights are trained or reused. PatchCore builds or reuses one coreset
+  memory bank from the normal training images and does not require epoch training.
+3. Each configured model produces a baseline FP32 ONNX artifact.
+4. FP16 conversion and dynamic INT8 quantization create additional feature or
+  reconstruction ONNX artifacts.
+5. Each enabled format is evaluated and benchmarked on the configured providers.
+6. Shared metrics and latency plots are saved under
+  `experiment_artifacts/{experiment_name}/`, while each model's artifacts are
+  isolated under its own subdirectory.
+
+PatchCore exports its ResNet18 feature extractor as ONNX, its sampled memory bank as
+`experiment_artifacts/{experiment_name}/patchcore/patchcore_memory_bank.npy`, and
+its scikit-learn nearest-neighbor index as
+`experiment_artifacts/{experiment_name}/patchcore/patchcore_nn_index.joblib`.
+Autoencoder artifacts are stored under the corresponding `autoencoder/` directory.
+PatchCore FP32, FP16, and INT8 measurements include
+feature extraction, host transfer, and nearest-neighbor scoring. The nearest-neighbor
+stage remains CPU-based and is included in CUDA end-to-end timings. These artifacts
+are intended to support a future serving adapter; the current serving endpoints still
+support only the autoencoder contract.
 
 The model uses fixed `224x224` RGB inputs. Images are resized to that square
 without preserving aspect ratio, so unusual source aspect ratios may distort

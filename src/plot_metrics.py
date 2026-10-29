@@ -42,6 +42,7 @@ def plot_latency_vs_size(results, output_path, percentile=50):
         formats,
         key=lambda model_format: format_order.get(model_format, len(format_order)),
     )
+    models = list(dict.fromkeys(result.get("model", "model") for result in results))
     devices = list(dict.fromkeys(result["device"] for result in results))
     device_labels = {
         "cpu": "CPU",
@@ -50,27 +51,32 @@ def plot_latency_vs_size(results, output_path, percentile=50):
 
     fig, ax = plt.subplots(figsize=(8, 5))
     x_values = range(len(formats))
-    for device in devices:
-        device_results = {
-            result["format"]: result
-            for result in results
-            if result["device"] == device
-        }
-        latencies = [
-            device_results[model_format][f"latency_p{percentile}"]
-            for model_format in formats
-            if model_format in device_results
-        ]
-        device_formats = [
-            model_format for model_format in formats if model_format in device_results
-        ]
-        ax.plot(
-            [formats.index(model_format) for model_format in device_formats],
-            latencies,
-            marker="o",
-            linewidth=2,
-            label=device_labels.get(device.lower(), device.upper()),
-        )
+    for model in models:
+        for device in devices:
+            device_results = {
+                result["format"]: result
+                for result in results
+                if result.get("model", "model") == model
+                and result["device"] == device
+            }
+            device_formats = [
+                model_format for model_format in formats if model_format in device_results
+            ]
+            if not device_formats:
+                continue
+            latencies = [
+                device_results[model_format][f"latency_p{percentile}"]
+                for model_format in device_formats
+            ]
+            ax.plot(
+                [formats.index(model_format) for model_format in device_formats],
+                latencies,
+                marker="o",
+                linewidth=2,
+                label=(
+                    f"{model} / {device_labels.get(device.lower(), device.upper())}"
+                ),
+            )
 
     ax.set_xticks(list(x_values), formats)
     ax.set_xlabel("Quantization Level")

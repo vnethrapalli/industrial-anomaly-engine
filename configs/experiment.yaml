@@ -25,6 +25,14 @@ models:
     selection: "best"
     # Saved under experiment_artifacts/{experiment_name}/
     weights_path: "autoencoder_weights.pth"
+  - name: "patchcore"
+    enabled: true
+    backbone: "resnet18"
+    # The bank is sampled once from all normal training images and reused by every format.
+    coreset_sampling_ratio: 0.1
+    memory_bank_path: "patchcore_memory_bank.npy"
+    index_path: "patchcore_nn_index.joblib"
+    metadata_path: "patchcore_metadata.json"
 
 quantization_targets:
   - format: "fp32"          # Baseline full precision ONNX

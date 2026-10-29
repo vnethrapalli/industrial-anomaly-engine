@@ -1,4 +1,5 @@
 from src.models.autoencoder import ConvAutoencoder
+from src.models.patchcore import PatchCoreMemoryBank
 
 
 def get_model(model_name: str, **kwargs):
@@ -7,7 +8,9 @@ def get_model(model_name: str, **kwargs):
 
     if model_name == "autoencoder":
         return ConvAutoencoder(**kwargs)
+    if model_name == "patchcore":
+        return PatchCoreMemoryBank(**kwargs)
     else:
         raise ValueError(
-            f"Unsupported model '{model_name}'. Choose from: ['autoencoder']"
+            f"Unsupported model '{model_name}'. Choose from: ['autoencoder', 'patchcore']"
         )

@@ -7,9 +7,14 @@ from pathlib import Path
 import yaml
 import torch
 import numpy as np
+import joblib
 
 from src.dataset import get_mvtec_dataloaders
-from src.export import export_to_onnx
+from src.export import (
+    export_patchcore_to_onnx,
+    export_to_onnx,
+    save_patchcore_components,
+)
 from src.plot_metrics import plot_latency_vs_size, plot_train_validation_loss
 
 
@@ -238,6 +243,138 @@ def evaluate_quantized_models(
     )
 
 
+def _collect_patchcore_scores(
+    session,
+    input_name: str,
+    dataloader,
+    nn_engine,
+    include_labels: bool,
+    input_dtype: np.dtype = np.float32,
+):
+    scores = []
+    labels = []
+    for batch in dataloader:
+        images = _batch_field(batch, "image")
+        model_input = images.detach().cpu().numpy().astype(input_dtype, copy=False)
+        feature_maps = np.asarray(session.run(None, {input_name: model_input})[0])
+        _, _, feature_height, feature_width = feature_maps.shape
+        patches = np.transpose(feature_maps, (0, 2, 3, 1)).reshape(
+            -1, feature_maps.shape[1]
+        )
+        distances, _ = nn_engine.kneighbors(patches)
+        batch_scores = distances.reshape(
+            feature_maps.shape[0], feature_height, feature_width
+        ).reshape(feature_maps.shape[0], -1).max(axis=1)
+        scores.extend(batch_scores.astype(np.float32).tolist())
+        if include_labels:
+            batch_labels = _batch_label(batch)
+            labels.extend(batch_labels.detach().cpu().numpy().astype(int).tolist())
+
+    if not scores:
+        raise RuntimeError("No images were available for PatchCore evaluation.")
+    return np.asarray(scores, dtype=np.float32), np.asarray(labels, dtype=np.int64)
+
+
+def evaluate_patchcore_anomaly_detection(
+    onnx_path: str,
+    memory_bank_path: str,
+    index_path: str,
+    datamodule,
+    threshold_percentile: float,
+    device: str = "auto",
+):
+    """Calibrate and evaluate PatchCore image scores for one quantization target."""
+    import onnxruntime as ort
+
+    provider = _select_evaluation_provider(device)
+    session = ort.InferenceSession(onnx_path, providers=[provider])
+    input_name = session.get_inputs()[0].name
+    input_dtype = np.float16 if session.get_inputs()[0].type == "tensor(float16)" else np.float32
+    memory_bank = np.load(memory_bank_path)
+    nn_engine = joblib.load(index_path)
+    if len(memory_bank) != nn_engine.n_samples_fit_:
+        raise RuntimeError("PatchCore memory bank and nearest-neighbor index do not match.")
+
+    validation_scores, _ = _collect_patchcore_scores(
+        session, input_name, datamodule.val_dataloader(), nn_engine, False, input_dtype
+    )
+    test_scores, test_labels = _collect_patchcore_scores(
+        session, input_name, datamodule.test_dataloader(), nn_engine, True, input_dtype
+    )
+    threshold = float(np.percentile(validation_scores, threshold_percentile))
+    predictions = test_scores >= threshold
+    true_positive = int(np.sum(predictions & (test_labels == 1)))
+    true_negative = int(np.sum(~predictions & (test_labels == 0)))
+    false_positive = int(np.sum(predictions & (test_labels == 0)))
+    false_negative = int(np.sum(~predictions & (test_labels == 1)))
+    precision = true_positive / max(true_positive + false_positive, 1)
+    recall = true_positive / max(true_positive + false_negative, 1)
+    f1 = 2 * precision * recall / max(precision + recall, 1e-12)
+    return {
+        "threshold_percentile": threshold_percentile,
+        "anomaly_threshold": threshold,
+        "evaluation_provider": provider,
+        "image_accuracy": float(np.mean(predictions == test_labels)),
+        "image_precision": precision,
+        "image_recall": recall,
+        "image_f1": f1,
+        "image_auroc": _binary_auroc(test_scores, test_labels),
+        "true_positive": true_positive,
+        "true_negative": true_negative,
+        "false_positive": false_positive,
+        "false_negative": false_negative,
+    }
+
+
+def benchmark_patchcore_model(
+    onnx_path: str,
+    memory_bank_path: str,
+    index_path: str,
+    num_runs: int = 100,
+    device: str = "cpu",
+):
+    """Benchmark feature extraction plus host transfer and nearest-neighbor scoring."""
+    import onnxruntime as ort
+
+    providers = {"cpu": "CPUExecutionProvider", "cuda": "CUDAExecutionProvider"}
+    try:
+        provider = providers[device.lower()]
+    except KeyError as exc:
+        raise ValueError(f"Unsupported benchmark device '{device}'. Use 'cpu' or 'cuda'.") from exc
+    if provider not in ort.get_available_providers():
+        raise RuntimeError(f"ONNX Runtime provider '{provider}' is not available.")
+
+    session = ort.InferenceSession(onnx_path, providers=[provider])
+    model_input = session.get_inputs()[0]
+    input_dtype = np.float16 if model_input.type == "tensor(float16)" else np.float32
+    nn_engine = joblib.load(index_path)
+    dummy_input = np.random.rand(1, 3, 224, 224).astype(input_dtype)
+
+    def score_once():
+        feature_maps = np.asarray(session.run(None, {model_input.name: dummy_input})[0])
+        patches = np.transpose(feature_maps, (0, 2, 3, 1)).reshape(
+            -1, feature_maps.shape[1]
+        )
+        nn_engine.kneighbors(patches)
+
+    for _ in range(10):
+        score_once()
+    latencies = []
+    for _ in range(num_runs):
+        start = time.perf_counter()
+        score_once()
+        latencies.append((time.perf_counter() - start) * 1000.0)
+
+    artifact_size = sum(
+        Path(path).stat().st_size for path in (onnx_path, memory_bank_path, index_path)
+    ) / (1024 * 1024)
+    return {
+        "size_mb": round(artifact_size, 4),
+        "latency_p50": round(np.percentile(latencies, 50), 2),
+        "latency_p99": round(np.percentile(latencies, 99), 2),
+    }
+
+
 def quantize_onnx_dynamic(input_onnx_path: str, output_onnx_path: str):
     """Applies Post-Training Dynamic INT8 Quantization to an ONNX model."""
     from onnxruntime.quantization import quantize_dynamic, QuantType
@@ -270,16 +407,32 @@ def get_artifact_path(experiment_name: str, artifact_name: str) -> Path:
     return artifact_directory / Path(artifact_name).name
 
 
+def get_model_artifact_path(
+    experiment_name: str, model_name: str, artifact_name: str
+) -> Path:
+    """Return a model-specific artifact path inside the experiment run."""
+    model_directory = Path("experiment_artifacts") / experiment_name / model_name
+    model_directory.mkdir(parents=True, exist_ok=True)
+    return model_directory / Path(artifact_name).name
+
+
 def get_selected_weights_path(experiment_name: str, model_cfg: dict, epochs: int):
     """Return the single weights artifact path for a model selection policy."""
     base_path = Path(model_cfg["weights_path"])
     selection = str(model_cfg.get("selection", "best"))
-    artifact_directory = Path("experiment_artifacts") / experiment_name
+    artifact_directory = (
+        Path("experiment_artifacts") / experiment_name / model_cfg["name"]
+    )
 
     if selection == "best":
         matching_paths = sorted(
             artifact_directory.glob(f"{base_path.stem}_best_epoch_*_of_*.pth")
         )
+        if not matching_paths:
+            legacy_directory = Path("experiment_artifacts") / experiment_name
+            matching_paths = sorted(
+                legacy_directory.glob(f"{base_path.stem}_best_epoch_*_of_*.pth")
+            )
         if len(matching_paths) > 1:
             raise RuntimeError(
                 f"Expected at most one selected weights file for {model_cfg['name']}, "
@@ -293,16 +446,24 @@ def get_selected_weights_path(experiment_name: str, model_cfg: dict, epochs: int
             "Use 'best' or 'epoch'."
         )
     selected_epoch = epochs
-    return get_artifact_path(
-        experiment_name, f"{base_path.stem}_epoch_{selected_epoch}_of_{epochs}.pth"
+    selected_path = get_model_artifact_path(
+        experiment_name,
+        model_cfg["name"],
+        f"{base_path.stem}_epoch_{selected_epoch}_of_{epochs}.pth",
     )
+    if selected_path.exists():
+        return selected_path
+    legacy_path = Path("experiment_artifacts") / experiment_name / selected_path.name
+    return legacy_path if legacy_path.exists() else selected_path
 
 
 def remove_selected_weights(
     experiment_name: str, model_cfg: dict
 ):
     """Remove previously generated selection artifacts for one architecture."""
-    artifact_directory = Path("experiment_artifacts") / experiment_name
+    artifact_directory = (
+        Path("experiment_artifacts") / experiment_name / model_cfg["name"]
+    )
     base_stem = Path(model_cfg["weights_path"]).stem
     for path in artifact_directory.glob(f"{base_stem}_best_epoch_*_of_*.pth"):
         path.unlink()
@@ -346,64 +507,115 @@ def run_experiment(config_path: str):
             continue
             
         print(f"\n--- Processing Model: {model_cfg['name']} ---")
-        
-        # Train / load baseline weights
-        epochs = config.get("training", {}).get("epochs", 10)
-        selection = str(model_cfg.get("selection", "best"))
-        selected_weights_path = get_selected_weights_path(
-            experiment_name, model_cfg, epochs
-        )
-        if selected_weights_path is None or not selected_weights_path.exists():
-            print(f"Trained weights not found for {model_cfg['name']}. Invoking training pipeline...")
-            from src.train import run_pipeline
-            
-            training_config = config.get("training", {})
-            output_stem = Path(model_cfg["weights_path"]).stem
-            remove_selected_weights(experiment_name, model_cfg)
-            if selection == "best":
-                output_name = f"{output_stem}_best_epoch_pending_of_{epochs}.tmp"
-            else:
-                output_name = f"{output_stem}_epoch_{epochs}_of_{epochs}.pth"
-            pending_path = get_artifact_path(experiment_name, output_name)
-            
-            # Pass the already-loaded datamodule directly into the pipeline router
-            history = run_pipeline(
-                model_name=model_cfg["name"],
-                category=config["category"],
-                datamodule=datamodule,
-                epochs=epochs,
-                lr=training_config.get("learning_rate", 1e-3),
-                device=training_config.get("device", "auto"),
-                save_path=str(pending_path),
-                selection=selection,
-                loss_alpha=float(training_config.get("loss_alpha", 0.85)),
-            )
-            if selection == "best":
-                best_epoch = history["best_epoch"]
-                selected_weights_path = get_artifact_path(
-                    experiment_name,
-                    f"{output_stem}_best_epoch_{best_epoch}_of_{epochs}.pth",
-                )
-                pending_path.rename(selected_weights_path)
-            else:
-                selected_weights_path = pending_path
-            plot_train_validation_loss(
-                history,
-                get_artifact_path(
-                    experiment_name, f"{output_stem}_loss.png"
+        model_stem = model_cfg["name"]
+        training_config = config.get("training", {})
+        if model_stem == "patchcore":
+            from src.models import get_model
+
+            patchcore_model = get_model(
+                "patchcore",
+                backbone_name=model_cfg.get("backbone", "resnet18"),
+                coreset_sampling_ratio=float(
+                    model_cfg.get("coreset_sampling_ratio", 0.1)
                 ),
             )
+            memory_bank_path = get_model_artifact_path(
+                experiment_name,
+                model_stem,
+                model_cfg.get("memory_bank_path", "patchcore_memory_bank.npy"),
+            )
+            index_path = get_model_artifact_path(
+                experiment_name,
+                model_stem,
+                model_cfg.get("index_path", "patchcore_nn_index.joblib"),
+            )
+            metadata_path = get_model_artifact_path(
+                experiment_name,
+                model_stem,
+                model_cfg.get("metadata_path", "patchcore_metadata.json"),
+            )
+            if memory_bank_path.exists() and index_path.exists():
+                patchcore_model.memory_bank = np.load(memory_bank_path)
+                patchcore_model.nn_engine = joblib.load(index_path)
+                print(f"Using existing PatchCore memory bank: {memory_bank_path}")
+            else:
+                requested_device = str(training_config.get("device", "auto")).lower()
+                if requested_device == "auto":
+                    fit_device = "cuda" if torch.cuda.is_available() else "cpu"
+                elif requested_device == "cuda" and not torch.cuda.is_available():
+                    fit_device = "cpu"
+                else:
+                    fit_device = requested_device
+                patchcore_model.fit(datamodule.train_dataloader(), device=fit_device)
+                save_patchcore_components(
+                    patchcore_model, str(memory_bank_path), str(index_path)
+                )
+            base_onnx = get_model_artifact_path(
+                experiment_name, model_stem, f"{model_stem}_fp32.onnx"
+            )
+            export_patchcore_to_onnx(
+                patchcore_model,
+                str(base_onnx),
+                str(metadata_path),
+                memory_bank_path=str(memory_bank_path),
+                index_path=str(index_path),
+            )
         else:
-            print(f"Using existing selected weights: {selected_weights_path}")
+            # Train / load baseline autoencoder weights.
+            epochs = config.get("training", {}).get("epochs", 10)
+            selection = str(model_cfg.get("selection", "best"))
+            selected_weights_path = get_selected_weights_path(
+                experiment_name, model_cfg, epochs
+            )
+            if selected_weights_path is None or not selected_weights_path.exists():
+                print(f"Trained weights not found for {model_cfg['name']}. Invoking training pipeline...")
+                from src.train import run_pipeline
 
-        # Export to FP32 ONNX first
-        model_stem = model_cfg["name"]
-        base_onnx = get_artifact_path(
-            experiment_name, f"{model_stem}_fp32.onnx"
-        )
-        export_to_onnx(
-            weights_path=str(selected_weights_path), onnx_output_path=str(base_onnx)
-        )
+                output_stem = Path(model_cfg["weights_path"]).stem
+                remove_selected_weights(experiment_name, model_cfg)
+                if selection == "best":
+                    output_name = f"{output_stem}_best_epoch_pending_of_{epochs}.tmp"
+                else:
+                    output_name = f"{output_stem}_epoch_{epochs}_of_{epochs}.pth"
+                pending_path = get_model_artifact_path(
+                    experiment_name, model_stem, output_name
+                )
+                history = run_pipeline(
+                    model_name=model_cfg["name"],
+                    category=config["category"],
+                    datamodule=datamodule,
+                    epochs=epochs,
+                    lr=training_config.get("learning_rate", 1e-3),
+                    device=training_config.get("device", "auto"),
+                    save_path=str(pending_path),
+                    selection=selection,
+                    loss_alpha=float(training_config.get("loss_alpha", 0.85)),
+                )
+                if selection == "best":
+                    best_epoch = history["best_epoch"]
+                    selected_weights_path = get_model_artifact_path(
+                        experiment_name,
+                        model_stem,
+                        f"{output_stem}_best_epoch_{best_epoch}_of_{epochs}.pth",
+                    )
+                    pending_path.rename(selected_weights_path)
+                else:
+                    selected_weights_path = pending_path
+                plot_train_validation_loss(
+                    history,
+                    get_model_artifact_path(
+                        experiment_name, model_stem, f"{output_stem}_loss.png"
+                    ),
+                )
+            else:
+                print(f"Using existing selected weights: {selected_weights_path}")
+
+            base_onnx = get_model_artifact_path(
+                experiment_name, model_stem, f"{model_stem}_fp32.onnx"
+            )
+            export_to_onnx(
+                weights_path=str(selected_weights_path), onnx_output_path=str(base_onnx)
+            )
 
         # 3. Handle Quantization Targets & Benchmarking
         for q_target in config["quantization_targets"]:
@@ -415,8 +627,8 @@ def run_experiment(config_path: str):
             if fmt == "fp32":
                 format_name = "FP32"
             elif fmt == "fp16":
-                fp16_onnx = get_artifact_path(
-                    experiment_name, f"{model_stem}_fp16.onnx"
+                fp16_onnx = get_model_artifact_path(
+                    experiment_name, model_stem, f"{model_stem}_fp16.onnx"
                 )
                 if (
                     not fp16_onnx.exists()
@@ -426,8 +638,8 @@ def run_experiment(config_path: str):
                 model_path = fp16_onnx
                 format_name = "FP16"
             elif fmt == "int8_dynamic":
-                quant_onnx = get_artifact_path(
-                    experiment_name, f"{model_stem}_int8.onnx"
+                quant_onnx = get_model_artifact_path(
+                    experiment_name, model_stem, f"{model_stem}_int8.onnx"
                 )
                 if (
                     not quant_onnx.exists()
@@ -439,12 +651,22 @@ def run_experiment(config_path: str):
             else:
                 raise ValueError(f"Unsupported quantization format '{fmt}'.")
 
-            detection_metrics = evaluate_quantized_models(
-                str(model_path),
-                datamodule,
-                threshold_percentile=threshold_percentile,
-                device=evaluation_device,
-            )
+            if model_stem == "patchcore":
+                detection_metrics = evaluate_patchcore_anomaly_detection(
+                    str(model_path),
+                    str(memory_bank_path),
+                    str(index_path),
+                    datamodule,
+                    threshold_percentile=threshold_percentile,
+                    device=evaluation_device,
+                )
+            else:
+                detection_metrics = evaluate_quantized_models(
+                    str(model_path),
+                    datamodule,
+                    threshold_percentile=threshold_percentile,
+                    device=evaluation_device,
+                )
             detection_results.append(
                 {
                     "model": model_cfg["name"],
@@ -454,11 +676,20 @@ def run_experiment(config_path: str):
             )
 
             for device in benchmark_devices:
-                metrics = benchmark_onnx_model(
-                    str(model_path),
-                    num_runs=benchmark_iterations,
-                    device=device,
-                )
+                if model_stem == "patchcore":
+                    metrics = benchmark_patchcore_model(
+                        str(model_path),
+                        str(memory_bank_path),
+                        str(index_path),
+                        num_runs=benchmark_iterations,
+                        device=device,
+                    )
+                else:
+                    metrics = benchmark_onnx_model(
+                        str(model_path),
+                        num_runs=benchmark_iterations,
+                        device=device,
+                    )
                 results.append(
                     {
                         "model": model_cfg["name"],

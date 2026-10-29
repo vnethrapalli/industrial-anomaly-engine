@@ -5,6 +5,7 @@ import torch
 from src.dataset import get_mvtec_dataloaders
 from src.models import get_model
 from src.models.autoencoder import ConvAutoencoder, compute_reconstruction_loss
+from src.models.patchcore import PatchCoreMemoryBank
 
 
 def train_custom_autoencoder(
@@ -108,6 +109,29 @@ def train_custom_autoencoder(
     }
 
 
+def prepare_patchcore(
+    model: PatchCoreMemoryBank,
+    datamodule,
+    device: str = "auto",
+):
+    """Build the PatchCore coreset bank without running a learned training loop."""
+    requested_device = device.lower()
+    if requested_device not in {"auto", "cpu", "cuda"}:
+        raise ValueError(
+            f"Unsupported PatchCore device '{device}'. Use 'auto', 'cpu', or 'cuda'."
+        )
+    if requested_device == "auto":
+        selected_device = "cuda" if torch.cuda.is_available() else "cpu"
+    elif requested_device == "cuda" and not torch.cuda.is_available():
+        print("CUDA requested for PatchCore preparation but unavailable; falling back to CPU.")
+        selected_device = "cpu"
+    else:
+        selected_device = requested_device
+
+    model.fit(datamodule.train_dataloader(), device=selected_device)
+    return {"train_losses": [], "validation_losses": [], "best_epoch": 0}
+
+
 def run_pipeline(
     model_name: str = "autoencoder",
     category: str = "bottle",
@@ -139,10 +163,9 @@ def run_pipeline(
             selection=selection,
             loss_alpha=loss_alpha,
         )
-    # Future model routing example:
-    # elif model_name == "patchcore":
-    #     model = get_patchcore_model(...)
-    #     train_patchcore(model, datamodule, ...)
+    elif model_name == "patchcore":
+        model = PatchCoreMemoryBank()
+        return prepare_patchcore(model, datamodule, device=device)
     else:
         raise ValueError(f"Unsupported model '{model_name}'.")
         
