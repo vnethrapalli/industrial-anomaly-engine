@@ -1,0 +1,28 @@
+{
+  "model": "patchcore",
+  "backbone": "resnet18",
+  "input_shape": [
+    1,
+    3,
+    224,
+    224
+  ],
+  "feature_shape": [
+    1,
+    256,
+    14,
+    14
+  ],
+  "preprocessing": {
+    "scale": "input pixels must be float32 in [0, 1]",
+    "normalization": "ImageNet mean/std applied inside feature extractor"
+  },
+  "coreset_sampling_ratio": 0.1,
+  "memory_bank": "patchcore_memory_bank.npy",
+  "nearest_neighbors_index": "patchcore_nn_index.joblib",
+  "nearest_neighbors": {
+    "metric": "euclidean",
+    "n_neighbors": 1,
+    "execution": "CPU via scikit-learn"
+  }
+}

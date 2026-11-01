@@ -215,6 +215,13 @@ tempCodeRunnerFile.py
 *.onnx
 *.onnx.data
 
+# PatchCore model artifacts
+*.npy
+*.joblib
+
+# Local experiment notes
+/notes.md
+
 # Marimo
 marimo/_static/
 marimo/_lsp/

@@ -29,8 +29,7 @@ Autoencoder artifacts are stored under the corresponding `autoencoder/` director
 PatchCore FP32, FP16, and INT8 measurements include
 feature extraction, host transfer, and nearest-neighbor scoring. The nearest-neighbor
 stage remains CPU-based and is included in CUDA end-to-end timings. These artifacts
-are intended to support a future serving adapter; the current serving endpoints still
-support only the autoencoder contract.
+are also consumed by the PatchCore serving endpoints described below.
 
 The model uses fixed `224x224` RGB inputs. Images are resized to that square
 without preserving aspect ratio, so unusual source aspect ratios may distort
@@ -67,6 +66,22 @@ python -m src.experiment --config configs/experiment.yaml
 - `src/export.py`: standalone PyTorch-to-ONNX export helper.
 - `notebooks/colab_experiment.ipynb`: interactive Colab workflow.
 
+## Serving the models
+
+The existing `POST /predict` and `POST /predict/overlay` endpoints serve the
+autoencoder. PatchCore is available through `POST /predict/patchcore` and
+`POST /predict/patchcore/overlay`. The PatchCore response includes its feature-distance
+score, thresholded regions, and a base64-encoded overlay using the same image resizing
+and region-coordinate behavior as the autoencoder endpoint.
+
+To enable PatchCore serving, place `patchcore_fp32.onnx`,
+`patchcore_memory_bank.npy`, and `patchcore_nn_index.joblib` in `app/`, or set
+`PATCHCORE_MODEL_PATH`, `PATCHCORE_MEMORY_BANK_PATH`, and `PATCHCORE_INDEX_PATH` to
+their locations. The PatchCore image threshold defaults to the calibrated FP32 value
+from the included experiment (`1.8178941`) and can be overridden with
+`PATCHCORE_ANOMALY_SCORE_THRESHOLD`. Its patch-map region threshold can be overridden
+with `PATCHCORE_ANOMALY_PIXEL_THRESHOLD`.
+
 ## Run the demo locally
 
 Run the training/export workflow in Colab, then place the selected
@@ -78,8 +93,9 @@ python -m pip install -r app/requirements.txt
 python -m uvicorn app.main:app --reload
 ```
 
-Open <http://127.0.0.1:8000/docs>, expand `POST /predict`, choose **Try it out**,
-and upload a PNG or JPEG image in the `file` field. The response includes the
+Open <http://127.0.0.1:8000/docs>, expand any of `POST /predict` or
+`POST /predict/patchcore`, choose **Try it out**, and upload a PNG or JPEG image
+in the `file` field. The response includes the
 reconstruction score, detected regions in the original image coordinates, and a
 base64-encoded highlighted PNG overlay. Use `POST /predict/overlay` to receive
 the highlighted result directly as a PNG response. The model must be present
@@ -94,17 +110,15 @@ docker build -f app/Dockerfile -t industrial-anomaly-api .
 
 ## Insights and findings
 
-- This autoencoder is small, so ONNX graph and quantization bookkeeping overhead
-  outweighs the reduced numeric representation. As a result, the FP16 and INT8
-  artifacts can be larger than the FP32 artifact. The storage savings from
-  quantization are more likely to appear with larger models.
-- FP32 and FP16 inference latency was very similar in these runs. Dynamic INT8
-  inference was slightly slower, likely because runtime quantization and conversion
-  overhead offsets the cheaper INT8 arithmetic for this small model.
-- These findings are model- and provider-dependent; larger models or different
-  hardware may show clearer FP16/INT8 size and latency benefits.
-- The autoencoder uses a hybrid reconstruction loss weighted 85% toward MSE and
-  15% toward SSIM; although this improves structural sharpness, global
-  autoencoders can dilute the pixel-level error from small localized defects,
-  motivating feature-bank memory architectures such as PatchCore.
-- The reported image-level AUROC for the autoencoder was 0.64145.
+- PatchCore improved FP32 image AUROC from `0.641` to `0.799` and F1 from `0.164`
+  to `0.777` in the evaluated run.
+- That improvement costs roughly `26.5 MB / 47 ms` CUDA p50 for PatchCore versus
+  `0.0045 MB / 1.46 ms` for the autoencoder. PatchCore FP16 and INT8 preserved
+  quality, but did not reduce latency or artifact size in this run.
+- PatchCore timing includes CUDA feature extraction followed by host transfer and
+  CPU scikit-learn nearest-neighbor lookup, so mixed-device execution contributes to
+  its latency pattern.
+- Both binary evaluations use a 95th-percentile threshold from normal validation
+  scores: about `0.004` reconstruction MSE for the autoencoder versus `1.818`
+  feature distance for PatchCore. AUROC is threshold-independent; F1 and other
+  binary metrics use the selected threshold.

@@ -4,6 +4,7 @@ import io
 import os
 from pathlib import Path
 
+import joblib
 import numpy as np
 import onnxruntime as ort
 from fastapi import FastAPI, File, HTTPException, UploadFile
@@ -14,8 +15,23 @@ IMAGE_SIZE = (224, 224)
 MAX_UPLOAD_BYTES = int(os.getenv("MAX_UPLOAD_BYTES", str(10 * 1024 * 1024)))
 APP_DIR = Path(__file__).resolve().parent
 MODEL_PATH = Path(os.getenv("MODEL_PATH", APP_DIR / "autoencoder_fp32.onnx"))
+PATCHCORE_MODEL_PATH = Path(
+    os.getenv("PATCHCORE_MODEL_PATH", APP_DIR / "patchcore_fp32.onnx")
+)
+PATCHCORE_MEMORY_BANK_PATH = Path(
+    os.getenv("PATCHCORE_MEMORY_BANK_PATH", APP_DIR / "patchcore_memory_bank.npy")
+)
+PATCHCORE_INDEX_PATH = Path(
+    os.getenv("PATCHCORE_INDEX_PATH", APP_DIR / "patchcore_nn_index.joblib")
+)
 SCORE_THRESHOLD = float(os.getenv("ANOMALY_SCORE_THRESHOLD", "0.01"))
 PIXEL_THRESHOLD = float(os.getenv("ANOMALY_PIXEL_THRESHOLD", "0.01"))
+PATCHCORE_SCORE_THRESHOLD = float(
+    os.getenv("PATCHCORE_ANOMALY_SCORE_THRESHOLD", "1.8178941")
+)
+PATCHCORE_PIXEL_THRESHOLD = float(
+    os.getenv("PATCHCORE_ANOMALY_PIXEL_THRESHOLD", str(PATCHCORE_SCORE_THRESHOLD))
+)
 MIN_REGION_AREA = int(os.getenv("MIN_REGION_AREA", "16"))
 
 app = FastAPI(title="Visual Anomaly Detection API", version="1.0")
@@ -24,6 +40,12 @@ session: ort.InferenceSession | None = None
 input_name: str | None = None
 input_dtype = np.float32
 model_error: str | None = None
+patchcore_session: ort.InferenceSession | None = None
+patchcore_input_name: str | None = None
+patchcore_input_dtype = np.float32
+patchcore_memory_bank: np.ndarray | None = None
+patchcore_nn_engine = None
+patchcore_error: str | None = None
 
 try:
     loaded_session = ort.InferenceSession(
@@ -43,6 +65,31 @@ try:
 except (OSError, RuntimeError, ValueError) as exc:
     model_error = str(exc)
     print(f"Warning: model could not be loaded from {MODEL_PATH}: {exc}")
+
+try:
+    loaded_patchcore_session = ort.InferenceSession(
+        str(PATCHCORE_MODEL_PATH),
+        providers=["CPUExecutionProvider"],
+    )
+    patchcore_model_input = loaded_patchcore_session.get_inputs()[0]
+    patchcore_input_name = patchcore_model_input.name
+    if patchcore_model_input.type == "tensor(float16)":
+        patchcore_input_dtype = np.float16
+    elif patchcore_model_input.type != "tensor(float)":
+        raise RuntimeError(
+            f"Unsupported PatchCore ONNX input type: {patchcore_model_input.type}"
+        )
+    loaded_memory_bank = np.load(PATCHCORE_MEMORY_BANK_PATH)
+    loaded_nn_engine = joblib.load(PATCHCORE_INDEX_PATH)
+    if len(loaded_memory_bank) != loaded_nn_engine.n_samples_fit_:
+        raise RuntimeError("PatchCore memory bank and nearest-neighbor index do not match.")
+    patchcore_session = loaded_patchcore_session
+    patchcore_memory_bank = loaded_memory_bank
+    patchcore_nn_engine = loaded_nn_engine
+    print(f"Loaded PatchCore model from {PATCHCORE_MODEL_PATH}")
+except (OSError, RuntimeError, ValueError) as exc:
+    patchcore_error = str(exc)
+    print(f"Warning: PatchCore model could not be loaded: {exc}")
 
 
 def _find_regions(mask: np.ndarray) -> list[tuple[int, int, int, int, int]]:
@@ -98,12 +145,63 @@ def _encode_overlay(image: Image.Image, mask: np.ndarray, regions: list[tuple[in
     return f"data:image/png;base64,{encoded}"
 
 
-def _prepare_model_input(image: Image.Image) -> np.ndarray:
+def _prepare_model_input(image: Image.Image, dtype: np.dtype = np.float32) -> np.ndarray:
     """Match src.dataset.py: resize RGB pixels and convert to NCHW [0, 1]."""
     resized = image.resize(IMAGE_SIZE, Image.Resampling.BILINEAR)
     image_array = np.asarray(resized, dtype=np.float32) / 255.0
     model_input = np.transpose(image_array, (2, 0, 1))[None, ...]
-    return model_input.astype(input_dtype, copy=False)
+    return model_input.astype(dtype, copy=False)
+
+
+def _build_patchcore_view(
+    original: Image.Image,
+    image_score: float,
+    patch_score_map: np.ndarray,
+) -> tuple[dict, np.ndarray]:
+    """Convert a PatchCore patch-distance map into regions and an overlay mask."""
+    resized_map = np.asarray(
+        Image.fromarray(patch_score_map.astype(np.float32), mode="F").resize(
+            IMAGE_SIZE, Image.Resampling.BILINEAR
+        ),
+        dtype=np.float32,
+    )
+    resized_mask = resized_map >= PATCHCORE_PIXEL_THRESHOLD
+    resized_regions = _find_regions(resized_mask)
+    original_width, original_height = original.size
+    scale_x = original_width / IMAGE_SIZE[0]
+    scale_y = original_height / IMAGE_SIZE[1]
+    region_details = [
+        {
+            "x": round(left * scale_x),
+            "y": round(top * scale_y),
+            "width": round((right - left) * scale_x),
+            "height": round((bottom - top) * scale_y),
+            "area": area,
+        }
+        for left, top, right, bottom, area in resized_regions
+    ]
+    anomaly_mask = np.asarray(
+        Image.fromarray((resized_mask * 255).astype(np.uint8), mode="L").resize(
+            original.size, Image.Resampling.NEAREST
+        ),
+        dtype=np.uint8,
+    ) // 255
+    regions = [
+        (
+            round(left * scale_x),
+            round(top * scale_y),
+            round(right * scale_x),
+            round(bottom * scale_y),
+            area,
+        )
+        for left, top, right, bottom, area in resized_regions
+    ]
+    return {
+        "patchcore_score": image_score,
+        "anomaly_detected": image_score >= PATCHCORE_SCORE_THRESHOLD,
+        "regions": region_details,
+        "overlay_image": _encode_overlay(original, anomaly_mask, regions),
+    }, anomaly_mask
 
 
 @app.get("/health")
@@ -111,7 +209,91 @@ def health_check() -> dict[str, str]:
     return {
         "status": "healthy" if session is not None else "unavailable",
         "model": str(MODEL_PATH),
+        "patchcore_status": "healthy"
+        if patchcore_session is not None
+        else "unavailable",
+        "patchcore_model": str(PATCHCORE_MODEL_PATH),
     }
+
+
+@app.post("/predict/patchcore")
+async def predict_patchcore(file: UploadFile = File(...)):
+    """Return a PatchCore score, anomalous regions, and a highlighted overlay."""
+    if not file.content_type or not file.content_type.startswith("image/"):
+        raise HTTPException(status_code=400, detail="File must be an image.")
+    if (
+        patchcore_session is None
+        or patchcore_input_name is None
+        or patchcore_memory_bank is None
+        or patchcore_nn_engine is None
+    ):
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                "PatchCore model is unavailable: "
+                f"{patchcore_error or 'unknown model loading error'}"
+            ),
+        )
+
+    try:
+        contents = await file.read(MAX_UPLOAD_BYTES + 1)
+        if len(contents) > MAX_UPLOAD_BYTES:
+            raise ValueError(
+                f"Image exceeds the {MAX_UPLOAD_BYTES // (1024 * 1024)} MB limit."
+            )
+        original = Image.open(io.BytesIO(contents)).convert("RGB")
+        model_input = _prepare_model_input(original, patchcore_input_dtype)
+        feature_maps = np.asarray(
+            patchcore_session.run(
+                None, {patchcore_input_name: model_input}
+            )[0],
+            dtype=np.float32,
+        )
+        if feature_maps.ndim != 4:
+            raise RuntimeError(
+                f"PatchCore model returned an invalid feature shape: {feature_maps.shape}"
+            )
+        patches = np.transpose(feature_maps, (0, 2, 3, 1)).reshape(
+            -1, feature_maps.shape[1]
+        )
+        distances, _ = patchcore_nn_engine.kneighbors(patches)
+        patch_scores = distances.reshape(
+            feature_maps.shape[0], feature_maps.shape[2], feature_maps.shape[3]
+        )
+        image_score = float(patch_scores.reshape(feature_maps.shape[0], -1).max())
+        view, _ = _build_patchcore_view(
+            original,
+            image_score,
+            patch_scores[0],
+        )
+        return {"filename": file.filename, **view}
+    except (OSError, ValueError, RuntimeError) as exc:
+        raise HTTPException(status_code=422, detail=f"Could not process image: {exc}") from exc
+
+
+@app.post(
+    "/predict/patchcore/overlay",
+    response_class=Response,
+    responses={200: {"content": {"image/png": {}}}},
+)
+async def predict_patchcore_overlay(file: UploadFile = File(...)) -> Response:
+    """Return the PatchCore highlighted prediction overlay as a PNG."""
+    result = await predict_patchcore(file)
+    data_url = result["overlay_image"]
+    _, separator, encoded_image = data_url.partition(",")
+    if not separator:
+        raise HTTPException(status_code=500, detail="Invalid overlay image payload.")
+
+    try:
+        image_bytes = base64.b64decode(encoded_image, validate=True)
+    except (binascii.Error, ValueError) as exc:
+        raise HTTPException(status_code=500, detail="Invalid overlay image payload.") from exc
+
+    return Response(
+        content=image_bytes,
+        media_type="image/png",
+        headers={"Content-Disposition": 'inline; filename="patchcore-overlay.png"'},
+    )
 
 
 @app.post("/predict")
